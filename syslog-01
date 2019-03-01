@@ -1,0 +1,3 @@
+#!/bin/bash
+sudo apt install curl
+curl -s https://raw.githubusercontent.com/conbu/scripts/master/cc-syslog-01-setup.sh | sudo /bin/bash -s 10.200.0.50 test_aws_key test_aws_sec_key test_bucket
