@@ -1,0 +1,58 @@
+#!/bin/bash
+
+# @sacloud-once
+# @sacloud-desc-begin
+#   The CONBU pre-setup startup script created by FoxBoxsnet
+#   デフォルトユーザー(ubuntu)を削除します。
+# @sacloud-desc-end
+
+# @sacloud-require-archive distro-ubuntu
+
+set -e
+
+# デフォルトユーザーの削除
+#userdel -r "ubuntu"
+
+# 新規ユーザー作成
+useradd -s /bin/bash -m "${ユーザ名}"
+echo "${ユーザ名}:${パスワード}" | /usr/sbin/chpasswd
+
+# sudo グループに追加
+gpasswd -a "${ユーザ名}" sudo
+
+cat << EOF1 | sudo tee /etc/sudoers.d/mekabu >> /dev/null
+${ユーザ名} ALL=(ALL) NOPASSWD:ALL
+EOF1
+
+# レポジトリー変更をIIJに変更
+sed -i.bak -e "s%http://us.archive.ubuntu.com/ubuntu/%http://ftp.iij.ad.jp/pub/linux/ubuntu/archive/%g" /etc/apt/sources.list
+
+# プリセットアップをインストール
+apt update
+apt upgrade -y
+apt install -y \
+    vim \
+    curl \
+    wget \
+    traceroute \
+    tmux \
+    dnsutils \
+
+
+# NTP サーバーをNICTへ
+systemctl stop systemd-timesyncd.service
+sed -ie 's/^#NTP=/NTP=ntp.nict.jp/g' /etc/systemd/timesyncd.conf
+sed -ie 's/^#FallbackNTP=/FallbackNTP/g' /etc/systemd/timesyncd.conf
+systemctl enable systemd-timesyncd.service
+systemctl restart systemd-timesyncd.service
+
+
+# タイムゾーンを 'Asia/Tokyo' にセット
+timedatectl set-timezone Asia/Tokyo
+
+
+# slack 通知
+curl -sfSL \
+  -X POST \
+  --data-urlencode 'payload={"channel": "#18b-notice-info", "username": "usacloud", "text": "`18b-cc-syslog01` deploy complete for Created by terraform."}' \
+  "https://${slack webhook url}"
