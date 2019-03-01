@@ -1,0 +1,10 @@
+#!/bin/bash
+
+apt update -y
+apt install -y jq
+address=$(cat /root/.sacloud-api/server.json | jq -r .Interfaces[1].UserIPAddress)
+netmask=$(cat /root/.sacloud-api/server.json | jq -r .Interfaces[1].Switch.UserSubnet.NetworkMaskLen)
+gateway=$(cat /root/.sacloud-api/server.json | jq -r .Interfaces[1].Switch.UserSubnet.DefaultRoute)
+ip addr add ${address}/${netmask} dev eth1
+ip link set up dev eth1
+ip route add 10.200.0.0/16 via ${gateway}
