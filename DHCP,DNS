@@ -1,0 +1,333 @@
+#!/bin/bash
+
+# @sacloud-once
+# @sacloud-desc unbound/isc-dhcpserver/zabbix-agentのinstallを実行します。
+# @sacloud-desc 完了後自動再起動します。
+# @sacloud-desc （このスクリプトは、Ubuntuでのみ動作します）
+# @sacloud-require-archive distro-ubuntu
+
+# @sacloud-text required maxlen=15 mgmt_net "マネージメント(mgmt)ネットワークアドレス(例:10.200.0.0)"
+# @sacloud-select-begin default=24 mgmt_pre "mgmtネットワークprefix値(例:/24)"
+#     24 "/24"
+#     20 "/20"
+#     16 "/16"
+# @sacloud-select-end
+# @sacloud-text required maxlen=15 mgmt_IP "mgmtセグメント側IPアドレス(例:10.200.0.12)"
+# @sacloud-text required maxlen=15 mgmt_sub "mgmtサブネットマスク(例:255.255.255.0)"
+# @sacloud-text required maxlen=15 mgmt_gw "mgmt default gateway(例:10.200.0.1)"
+# @sacloud-text required maxlen=15 usersw_net "userswネットワークアドレス(例:10.20.0.0)"
+# @sacloud-select-begin default=24 usersw_pre "userswネットワークprefix値(例:/24)"
+#     24 "/24"
+#     20 "/20"
+#     16 "/16"
+# @sacloud-select-end
+# @sacloud-text required maxlen=15 usersw_IP "userswセグメント側IPアドレス(例:10.20.0.12)"
+# @sacloud-text required maxlen=15 usersw_sub "userセグメントネットマスク(例:255.255.255.0)"
+# @sacloud-text required maxlen=15 usersw_gw "userセグメントgateway(例:10.20.0.1)"
+# @sacloud-text required maxlen=15 genti_net "wifi会場mgmtネットワークセグメント(例:10.200.10.0)"
+# @sacloud-select-begin default=24 genti_pre "wifi会場mgmtネットワークprefix値(例:/24)"
+#     24 "/24"
+#     20 "/20"
+#     16 "/16"
+#     8 "/8"
+# @sacloud-select-end
+# @sacloud-text required maxlen=15 genti_sub "wifi会場mgmtネットワークネットマスク(例:255.255.255.0)"
+# @sacloud-text required maxlen=15 wifi_net "wifi会場ユーザネットワークセグメント(例:10.20.16.0)"
+# @sacloud-text required maxlen=15 wifi_sub "wifi会場ユーザネットワークネットマスク(例:255.255.240.0)"
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get -y update
+apt-get -y upgrade
+apt-get -y install unbound
+apt-get -y install isc-dhcp-server
+apt-get -y install zabbix-agent
+
+ufw enable
+ufw default DENY
+ufw allow 53
+ufw allow 123
+ufw allow 68
+ufw allow 67
+ufw allow from @@@mgmt_net@@@/@@@mgmt_pre@@@
+
+# ネットワーク設定
+# 各サーバのNICとアドレス設計に合わせて適宜修正が必要。
+cat << EOS >> /etc/network/interfaces
+auto eth1
+iface eth1 inet static
+address @@@usersw_IP@@@
+netmask @@@usersw_sub@@@
+
+auto eth2
+iface eth2 inet static
+address @@@mgmt_IP@@@
+netmask @@@mgmt_sub@@@
+
+up route add -net @@@genti_net@@@/@@@genti_pre@@@ gw @@@mgmt_gw@@@ dev eth2
+EOS
+
+cp -f /etc/hosts /etc/hosts.default
+cat << HEOS > /etc/hosts || exit 1
+127.0.0.1       localhost `hostname`
+
+
+# The following lines are desirable for IPv6 capable hosts
+::1     localhost ip6-localhost ip6-loopback
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+HEOS
+
+# zabbix-agent設定
+ZABCONF="/etc/zabbix/zabbix_agentd.conf"
+cp -f ${ZABCONF} ${ZABCONF}.default
+sed '/^Server=/d' ${ZABCONF}.default | sed '/^Hostname=/d' > ${ZABCONF}
+cat << ZEOS >> ${ZABCONF}
+Server=10.200.0.14
+Hostname=`hostname`
+ZEOS
+
+# unbound設定
+cp -f /etc/unbound/unbound.conf /etc/unbound/unbound.conf.default
+mkdir /var/log/unbound
+mkdir /var/run/unbound
+
+cat << UEOS > /etc/unbound/unbound.conf
+include: "/etc/unbound/unbound.conf.d/*.conf"
+server:
+        interface:@@@mgmt_IP@@@
+        interface:@@@usersw_IP@@@
+        interface:127.0.0.1
+        access-control: 10.0.0.0/8 allow
+        verbosity: 3
+        statistics-interval: 0
+        statistics-cumulative: yes
+        extended-statistics: yes
+        num-threads: 2
+        interface-automatic: no
+        outgoing-port-permit: 32768-65535
+        outgoing-port-avoid: 0-32767
+        max-udp-size: 3072
+
+        do-ip4: yes
+        do-ip6: no
+chroot: ""
+
+        username: "unbound"
+        directory: "/etc/unbound"
+        logfile: "/var/log/unbound/unbound.log"
+
+        use-syslog: yes
+        log-time-ascii: yes
+        log-queries: yes
+        pidfile: "/var/run/unbound/unbound.pid"
+
+        harden-glue: yes
+        harden-dnssec-stripped: yes
+        harden-below-nxdomain: yes
+        harden-referral-path: yes
+        use-caps-for-id: no
+        unwanted-reply-threshold: 10000000
+
+        prefetch: yes
+        prefetch-key: yes
+        rrset-roundrobin: yes
+        minimal-responses: yes
+        val-clean-additional: yes
+        val-permissive-mode: no
+        val-log-level: 1
+
+remote-control:
+        control-enable: yes
+        server-key-file: "/etc/unbound/unbound_server.key"
+        server-cert-file: "/etc/unbound/unbound_server.pem"
+        control-key-file: "/etc/unbound/unbound_control.key"
+        control-cert-file: "/etc/unbound/unbound_control.pem"
+UEOS
+
+cat << CEOS > /etc/unbound/unbound.conf.d/conbu.net.conf
+server:
+        local-data: "proxy.conbu.net A 10.200.0.11"
+        local-data: "api        CNAME proxy.conbu.net"
+        local-data: "zabbix     CNAME proxy.conbu.net"
+        local-data: "kibana     CNAME proxy.conbu.net"
+        local-data: "syslog.conbu.net A 10.200.0.15"
+CEOS
+
+
+#NTPD設定
+#ntpd.confを修正する。
+cp -f /etc/ntp.conf /etc/ntp.conf.default
+cat << NEOS > /etc/ntp.conf 
+# /etc/ntp.conf, configuration for ntpd;
+
+driftfile /var/lib/ntp/ntp.drift
+
+statistics loopstats peerstats clockstats
+filegen loopstats file loopstats type day enable
+filegen peerstats file peerstats type day enable
+filegen clockstats file clockstats type day enable
+# Specify one or more NTP servers.
+server ntp1.sakura.ad.jp iburst
+server ntp.nict.jp iburst
+
+# By default, exchange time with everybody, but don't allow configuration.
+restrict -4 default ignore
+restrict -6 default ignore
+restrict -4 ntp1.sakura.ad.jp kod notrap nomodify nopeer noquery limited
+
+# Local users may interrogate the ntp server more closely.
+restrict 127.0.0.1
+restrict ::1 
+restrict @@@mgmt_net@@@ mask @@@mgmt_sub@@@
+restrict @@@genti_net@@@ mask @@@genti_sub@@@
+restrict @@@usersw_net@@@ mask @@@usersw_sub@@@
+
+# Needed for adding pool entries
+restrict source notrap nomodify noquery
+NEOS
+
+# DHCP設定
+# rsyslogのconfでlocal.4をdhcp.logに指定
+echo "local4.*                /var/log/dhcpd.log" > /etc/rsyslog.d/40-conbu.conf
+
+# dhcpd.confを作成する。
+cp -f /etc/dhcp/dhcpd.conf /etc/dhcp/dhcpd.conf.OSdefault
+cat << DEOS > /etc/dhcp/dhcpd.conf.default 
+#============
+#  conbu
+#  dhcpd.conf
+#============
+
+default-lease-time 900;
+lease-file-name "/var/lib/dhcp/dhcpd.leases";
+db-time-format local;
+ddns-update-style none;
+authoritative;
+log-facility local4;
+
+#-------
+# conbu-server-local
+# @@@mgmt_net@@@/@@@mgmt_pre@@@ (@@@mgmt_sub@@@)
+# @@@usersw_net@@@/@@@usersw_pre@@@ (@@@usersw_sub@@@)
+#-------
+subnet @@@mgmt_net@@@ netmask @@@mgmt_sub@@@ { }
+subnet @@@usersw_net@@@ netmask @@@usersw_sub@@@ { }
+
+DEOS
+sysv-rc-conf isc-dhcp-server off
+cat << 'SHEOS' > /usr/local/bin/makedhcpconfig.sh
+#!/bin/sh
+
+echo "========"
+echo "DHCP config wizard for CONBU Wifi"
+echo "========"
+echo ""
+echo "We need 2 DHCP networks(for User-Wifi-net & Management-net). please write answer to following question."
+echo "At first, DHCP for User-Wifi network in the Event hall"
+echo "User-WiFi network address? (ex:10.16.0.0/20) : "
+read U_WiFi_net
+echo "User-WiFi DHCP lease low range? (ex:10.16.0.11) : "
+read U_WiFi_low
+echo "User-WiFi DHCP lease high range? (ex:10.16.31.250) : "
+read U_WiFi_high
+echo "User-WiFi default gateway? (ex:10.16.0.1) : "
+read U_WiFi_gw
+echo "User-WiFi broadcast address? (ex:10.16.31.255) : "
+read U_WiFi_bcast
+echo "User-WiFi DNSserver IP address?(ex:10.20.0.16) : "
+read U_WiFi_dns
+
+echo "--------"
+echo "OK,please check User-WiFi DHCP setting : "
+echo "--------"
+echo "User-wifi network address: $U_WiFi_net"
+echo "User-wifi DHCP lease range: $U_WiFi_low - $U_WiFi_high" 
+echo "User-wifi default gateway: $U_WiFi_gw"
+echo "User-wifi broadcast address: $U_WiFi_bcast"
+echo "User-wifi DNSserver IP address: $U_WiFi_dns"
+echo "It is for User-wifi setting, ok? [y/n]: "
+read U_ans
+
+if [ $U_ans = "yes" -o $U_ans = "y" ]
+then
+echo "Sencond, DHCP for management(mgmt) network at event hall"
+echo "mgmt-wifi network address? (ex:172.16.0.0/24) : "
+read M_Wifi_net
+echo "mgmt-wifi DHCP lease low range? (ex:172.16.0.11) : "
+read M_Wifi_low
+echo "mgmt-wifi DHCP lease high range? (ex:172.16.0.250) : "
+read M_Wifi_high
+echo "mgmt-wifi default gateway? (ex:172.16.0.1) : "
+read M_Wifi_gw
+echo "mgmt-wifi broadcast address? (ex:172.16.0.255) : "
+read M_Wifi_bcast
+echo "mgmt-wifi DNSserver IP address? (ex:10.200.0.16) : "
+read M_Wifi_dns
+
+echo "----------"
+echo "OK,please check mgmt-wifi DHCP setting : "
+echo "----------"
+echo "mgmt-wifi network address: $M_Wifi_net"
+echo "mgmt-wifi DHCP lease range: $M_Wifi_low - $M_Wifi_high" 
+echo "mgmt-wifi default gateway: $M_Wifi_gw"
+echo "mgmt-wifi broadcast address: $M_Wifi_bcast"
+echo "mgmt-wifi DNSserver IP address: $M_Wifi_dns"
+echo "It is for mgmt-wifi setting, ok? [y/n]: "
+read M_ans
+
+ if [ $M_ans = "yes" -o $M_ans = "y" ]
+ then
+
+cp -f /etc/dhcp/dhcpd.conf.default /etc/dhcp/dhcpd.conf
+cat << WEOS >> /etc/dhcp/dhcpd.conf
+
+#-------------
+# for mgmt-Wifi(at Event Hall management segment)
+# @@@genti_net@@@/@@@genti_pre@@@ (@@@genti_sub@@@)
+#-------------
+subnet @@@genti_net@@@ netmask @@@genti_sub@@@{
+  range $M_Wifi_low $M_Wifi_high;
+  option routers $M_Wifi_gw;
+  option broadcast-address $M_Wifi_bcast;
+  option domain-name-servers $M_Wifi_dns;
+  default-lease-time 7200;
+  max-lease-time 7200;
+}
+#------------
+# for Wifiuser
+# $U_WiFi_net (@@@wifi_sub@@@)
+#------------
+subnet @@@wifi_net@@@ netmask @@@wifi_sub@@@{
+  range $U_WiFi_low $U_WiFi_high;
+  option routers $U_WiFi_gw;
+  option broadcast-address $U_WiFi_bcast;
+  option domain-name-servers $U_WiFi_dns;
+  default-lease-time 7200;
+  max-lease-time 7200;
+}
+WEOS
+cat << IEOS >> /etc/network/interfaces
+up route add -net $U_WiFi_net gw @@@usersw_gw@@@ dev eth1
+IEOS
+sudo service networking restart
+ else
+  echo "canceled"
+ fi
+else
+ echo "canceled"
+fi
+echo "Always auto start-up DHCPserver?[y/n]"
+read autoans
+if [ $autoans = "yes" -o $autoans = "y" ]
+then
+ sysv-rc-conf isc-dhcp-server on
+ sudo service isc-dhcp-server restart
+else
+ echo "No auto"
+fi
+SHEOS
+useradd nankotsu -m
+cp -f /etc/group /etc/group.default
+sed 's/sudo:\(.*\)$/sudo:\1,nankotsu/g' /etc/group.default > /etc/group
+sh -c 'sleep 10; reboot' &
+exit 0
