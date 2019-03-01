@@ -1,0 +1,215 @@
+内容	
+#!/bin/bash
+# @sacloud-once
+# @sacloud-desc-begin
+# Terraform からzabbix server/agentのインストールおよび、apt-get update/upgrade/を実行します
+# 完了後自動再起動します
+# このスクリプトは、Ubuntuでのみ動作します
+# このスクリプトのDBは、mysql5.7を想定しています
+# このスクリプトのPHPは、7.0を想定しています
+# このスクリプトはデフォルトユーザー(ubuntu)を削除します。
+# @sacloud-desc-end
+# @sacloud-require-archive distro-ubuntu
+
+set -e
+
+# デフォルトユーザーの削除
+userdel -r "ubuntu"
+
+# 新規ユーザー作成
+useradd -s /bin/bash -m "${ユーザ名}"
+echo "${ユーザ名}:${パスワード}" | /usr/sbin/chpasswd
+
+# sudo グループに追加
+gpasswd -a "${ユーザ名}" sudo
+#cat << EOF1 | sudo tee /etc/sudoers.d/${ユーザ名} >> /dev/null
+#${ユーザ名} ALL=(ALL) NOPASSWD:ALL
+#EOF1
+
+# プリセットアップをインストール
+export DEBIAN_FRONTEND=noninteractive
+sudo -E apt-get -y update || exit 1
+sudo -E apt-get -y upgrade || exit 1
+apt install -y \
+    vim \
+    curl \
+    wget \
+    traceroute \
+    tmux \
+    dnsutils \
+
+# ---------START OF,Hosts,SSH,NTP,timezone---------
+# Hosts
+cat <<BEOS>> /etc/hosts
+10.20.0.51 18b-cc-zabbix01
+BEOS
+sed -i "s%^::1%#::1%" /etc/hosts
+sed -i "s%^ff02::1%#ff02::1%" /etc/hosts
+sed -i "s%^ff02::2%#ff02::2%" /etc/hosts
+
+#SSH
+cat <<CEOS>> /etc/hosts.allow
+sshd : 10.20.0.51/24
+CEOS
+
+cat <<DEOS>> /etc/hosts.deny
+sshd : all
+DEOS
+
+sed -i "s%^#ListenAddress 0.0.0.0%ListenAddress 10.20.0.51%" /etc/ssh/sshd_config
+sed -i "s%^PermitRootLogin prohibit-password%#PermitRootLogin prohibit-password%" /etc/ssh/sshd_config
+sed -i "s%^#PasswordAuthentication yes%PasswordAuthentication yes%" /etc/ssh/sshd_config
+sed -i "s%^UsePAM yes%UsePAM no%" /etc/ssh/sshd_config
+
+cat <<EEOS>> /etc/ssh/sshd_config
+PermitRootLogin no
+EEOS
+
+# NTP
+sudo -E apt-get -y install ntp
+systemctl stop systemd-timesyncd.service
+sed -i "s%^pool ntp.ubuntu.com%#pool ntp.ubuntu.com%g" /etc/ntp.conf
+sed -i "s%^server ntp1.sakura.ad.jp%server ntp.nict.jp%" /etc/ntp.conf
+sed -i "s%^restrict -4 ntp1.sakura.ad.jp%restrict -4 ntp.nict.jp%" /etc/ntp.conf
+sed -ie 's/^#NTP=/NTP=ntp.nict.jp/g' /etc/systemd/timesyncd.conf
+sed -ie 's/^#FallbackNTP=/FallbackNTP/g' /etc/systemd/timesyncd.conf
+systemctl enable systemd-timesyncd.service
+systemctl restart systemd-timesyncd.service
+
+# タイムゾーンを 'Asia/Tokyo' にセット
+timedatectl set-timezone Asia/Tokyo
+
+# ---------END OF User modfy,Hosts,SSH,NTP,timezone---------
+
+# -----------START OF Apache---------
+sudo -E apt-get -y install apache2 || exit 1
+sed -i "s%^ServerTokens OS%ServerTokens Prod%" /etc/apache2/conf-enabled/security.conf
+systemctl enable apache2
+# -----------END OF Apache-----------
+
+# -----------START OF PHP-----------
+#PHPのバージョン指定を何とかしたい
+sudo -E apt-get -y install php php-cgi libapache2-mod-php php-common php-pear php-mbstring || exit 1
+a2enconf php7.0-cgi
+sed -i "s%^;date.timezone =%date.timezone = "Asia/Tokyo"%" /etc/php/7.0/apache2/php.ini
+sed -i "s%^max_execution_time = 30%max_execution_time = 300%" /etc/php/7.0/apache2/php.ini
+sed -i "s%^max_input_time = 60%max_input_time = 300%" /etc/php/7.0/apache2/php.ini
+sed -i "s%^post_max_size = 8M%post_max_size = 16M%" /etc/php/7.0/apache2/php.ini
+# -----------END OF PHP-----------
+
+# -----------START OF Firewall-----------
+ufw enable || exit 1
+ufw default DENY || exit 1
+ufw allow 22 || exit 1
+ufw allow 53 || exit 1
+ufw allow 80 || exit 1
+ufw allow 123 || exit 1
+ufw allow 161 || exit 1
+ufw allow 162 || exit 1
+ufw allow 443 || exit 1
+ufw allow 10050 || exit 1
+ufw allow 10051 || exit 1
+systemctl enable ufw
+# -----------END OF Firewall-----------
+
+# -----------START OF Network----------- #
+# 各サーバのインターフェイスとアドレス設計に合わせて適宜修正が必要。
+cat << EOS >> /etc/network/interfaces
+auto eth0
+iface eth0 inet static
+address 10.20.0.51
+netmask 24
+gateway 10.20.0.1
+
+up route add -net 10.30.0.0/24 gw 10.20.0.1 dev eth0
+
+EOS
+# -----------END OF Network----------- #
+
+#---------START OF DB---------#
+#mysqlのバージョン指定をなんとかしたい
+echo "mysql-server-5.7 mysql-server/root_password password" zabbix | debconf-set-selections
+echo "mysql-server-5.7 mysql-server/root_password_again password" zabbix | debconf-set-selections
+sudo -E apt-get -y install mysql-server-5.7
+#---------END OF DB---------#
+
+#---------START OF Zabbix---------#
+
+### パラメータの設定
+#my.cnfの設定
+#一時的にパスワード認証を無しとしている
+cat <<AEOS>> /etc/mysql/my.cnf
+[mysqld]
+character-set-server = utf8
+collation-server     = utf8_bin
+skip-character-set-client-handshake
+innodb_file_per_table
+innodb_buffer_pool_size=1024MB
+innodb_log_file_size=128M
+[mysql]
+default-character-set = utf8
+[client]
+default-character-set=utf8
+host=localhost
+user=root
+password=zabbix
+AEOS
+
+### DBとDBユーザの作成
+mysql -uroot -e "create database zabbix character set utf8 collate utf8_bin;"
+mysql -uroot -e "grant all privileges on zabbix.* to zabbix@localhost identified by 'zabbix';"
+mysql -uroot -e "flush privileges;"
+
+wget "http://repo.zabbix.com/zabbix/3.2/ubuntu/pool/main/z/zabbix-release/zabbix-release_3.2-1+xenial_all.deb"
+sudo dpkg -i zabbix-release_3.2-1+xenial_all.deb
+
+sudo apt-get update
+sudo -E apt-get -y install snmp || exit 1
+sudo -E apt-get -y install zabbix-server-mysql zabbix-agent zabbix-frontend-php php-mysql php-gd php-xml-util php-mbstring php-bcmath php-net-socket php-gettext || exit 1
+
+# DBテーブルの作成
+cd /usr/share/doc/zabbix-server-mysql/
+sudo zcat create.sql.gz | mysql -uroot zabbix
+#cd /usr/share/zabbix-server-mysql/
+#sudo zcat schema.sql.gz | mysql -uroot zabbix
+#sudo zcat images.sql.gz | mysql -uroot zabbix
+#sudo zcat data.sql.gz | mysql -uroot zabbix
+
+
+## Zabbixコンフィグ内DBユーザパスワード設定
+sed -i -e "s%# DBPassword=%DBPassword=zabbix%" /etc/zabbix/zabbix_server.conf
+
+systemctl start zabbix-server
+systemctl enable zabbix-server
+systemctl start zabbix-agent
+systemctl enable zabbix-agent
+systemctl restart apache2
+
+##MIBsの設定
+sudo -E apt-get -y install snmp-mibs-downloader
+cat <<FEOS>> /etc/snmp/snmp.conf
+mibdirs  /home/ubuntu/.snmp/mibs:/usr/share/snmp/mibs:/usr/share/snmp/mibs/iana:/usr/share/snmp/mibs/ietf:/usr/share/mibs/site:/usr/share/snmp/mibs:/usr/share/mibs/iana:/usr/share/mibs/ietf:/usr/share/mibs/netsnmp:/var/lib/mibs/iana:/var/lib/mibs/ietf
+mibs +ALL
+FEOS
+
+#my.cnfの設定
+#パスワード認証を有りに戻している
+sed -i "s%^host=localhost%%" /etc/mysql/my.cnf
+sed -i "s%^user=root%%" /etc/mysql/my.cnf
+sed -i "s%^password=zabbix%%" /etc/mysql/my.cnf
+
+#Zabbixの日本語対応
+##グラフ
+sudo -E apt-get -y install fonts-ipafont-gothic
+sudo ln -s /usr/share/fonts/opentype/ipafont-gothic/ipag.ttf /usr/share/zabbix/fonts/graphfont.ttf
+sudo sed -i "s%realpath('fonts')%'/usr/share/fonts/opentype/ipafont-gothic'%" /usr/share/zabbix/include/defines.inc.php
+sudo sed -i "s%graphfont%ipag%" /usr/share/zabbix/include/defines.inc.php
+#インターフェイス
+sudo localedef -f UTF-8 -i ja_JP ja_JP
+sudo service zabbix-server restart
+sudo service apache2 restart
+
+#---------END OF Zabbix---------#
+
+sh -c 'sleep 10; reboot' &
+exit 0
