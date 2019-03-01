@@ -20,7 +20,7 @@ echo "${ユーザ名}:${パスワード}" | /usr/sbin/chpasswd
 # sudo グループに追加
 gpasswd -a "${ユーザ名}" sudo
 
-cat << EOF1 | sudo tee /etc/sudoers.d/mekabu >> /dev/null
+cat << EOF1 | sudo tee /etc/sudoers.d/${ユーザ名} >> /dev/null
 ${ユーザ名} ALL=(ALL) NOPASSWD:ALL
 EOF1
 
